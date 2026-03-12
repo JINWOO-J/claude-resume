@@ -1,0 +1,13 @@
+# OMC state
+.omc/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Cache
+.cache/

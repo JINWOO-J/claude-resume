@@ -688,7 +688,10 @@ class SessionPicker(App):
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="TUI session picker for Claude Code resume")
+    parser = argparse.ArgumentParser(
+        description="TUI session picker for Claude Code resume",
+        epilog="All other arguments are passed through to the claude CLI.",
+    )
     parser.add_argument("--global", "-g", dest="global_mode", action="store_true",
                         help="Start in global (all projects) mode")
     parser.add_argument("--local", "-l", dest="local_mode", action="store_true",

@@ -1,0 +1,10 @@
+LICENSE
+README.md
+claude_resume.py
+pyproject.toml
+claude_resume.egg-info/PKG-INFO
+claude_resume.egg-info/SOURCES.txt
+claude_resume.egg-info/dependency_links.txt
+claude_resume.egg-info/entry_points.txt
+claude_resume.egg-info/requires.txt
+claude_resume.egg-info/top_level.txt

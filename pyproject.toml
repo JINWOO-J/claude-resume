@@ -1,0 +1,36 @@
+[project]
+name = "claude-resume"
+version = "0.1.1"
+description = "TUI session picker for Claude Code --resume"
+requires-python = ">=3.10"
+license = "MIT"
+readme = "README.md"
+authors = [
+    { name = "Jinwoo Jeong" },
+]
+keywords = ["claude", "claude-code", "tui", "session", "resume"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: User Interfaces",
+]
+dependencies = [
+    "textual>=0.40",
+]
+
+[project.urls]
+Homepage = "https://github.com/jinwoo/claude-resume"
+Repository = "https://github.com/jinwoo/claude-resume"
+
+[project.scripts]
+claude-resume = "claude_resume:main"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"

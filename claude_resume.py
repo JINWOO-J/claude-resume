@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
@@ -34,6 +35,7 @@ class Session:
     git_branch: str
     created: str  # ISO format string for cache serialization
     modified: str  # ISO format string
+    last_response: str = ""
 
     @property
     def created_dt(self) -> datetime:
@@ -126,11 +128,16 @@ def _load_from_index(index_file: Path) -> list[Session]:
         return []
 
     sessions = []
+    project_dir = index_file.parent
     for entry in data.get("entries", []):
         if entry.get("isSidechain", False):
             continue
+        session_id = entry.get("sessionId", "")
+        # Skip orphan sessions (no JSONL file)
+        if not (project_dir / f"{session_id}.jsonl").exists():
+            continue
         project_path = entry.get("projectPath", "")
-        project_name = Path(project_path).name if project_path else index_file.parent.name
+        project_name = Path(project_path).name if project_path else project_dir.name
         try:
             # Validate dates parse correctly
             _parse_iso(entry["created"])
@@ -138,7 +145,7 @@ def _load_from_index(index_file: Path) -> list[Session]:
         except (KeyError, ValueError):
             continue
         sessions.append(Session(
-            session_id=entry["sessionId"],
+            session_id=session_id,
             project_name=project_name,
             project_path=project_path,
             first_prompt=entry.get("firstPrompt", ""),
@@ -201,11 +208,13 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
                 except json.JSONDecodeError:
                     continue
 
-                if i == 0:
-                    if obj.get("isSidechain", False):
-                        return None
+                if obj.get("isSidechain", False):
+                    return None
+                if not git_branch:
                     git_branch = obj.get("gitBranch", "")
+                if not cwd:
                     cwd = obj.get("cwd", "")
+                if first_ts is None:
                     ts = obj.get("timestamp")
                     if ts:
                         try:
@@ -277,11 +286,9 @@ def load_all_sessions(no_cache: bool = False) -> list[Session]:
             sessions.append(s)
             indexed_session_ids.add(s.session_id)
 
-    # 2) Fallback: scan JSONL files in project dirs without index
+    # 2) Scan JSONL files not covered by any index
     for project_dir in claude_dir.iterdir():
         if not project_dir.is_dir():
-            continue
-        if (project_dir / "sessions-index.json").exists():
             continue
         for jsonl_file in project_dir.glob("*.jsonl"):
             sid = jsonl_file.stem
@@ -291,6 +298,11 @@ def load_all_sessions(no_cache: bool = False) -> list[Session]:
             if session:
                 sessions.append(session)
                 indexed_session_ids.add(session.session_id)
+
+    # Fill last_response for each session
+    for s in sessions:
+        if not s.last_response:
+            s.last_response = _get_last_assistant_response(s.session_id)
 
     sessions.sort(key=lambda s: _parse_iso(s.modified), reverse=True)
 
@@ -320,11 +332,72 @@ def _find_session_jsonl(session_id: str) -> Path | None:
     return None
 
 
-def get_last_user_prompt(session_id: str) -> str:
-    """Extract the last user message from a session's JSONL file."""
+def _first_paragraph(text: str) -> str:
+    """Extract the first non-empty paragraph from text."""
+    for para in text.split("\n\n"):
+        stripped = para.strip()
+        if stripped:
+            # Collapse to single line
+            return " ".join(stripped.split())
+    return text.strip()
+
+
+def _get_last_assistant_response(session_id: str) -> str:
+    """Extract the first paragraph of the last assistant response."""
     filepath = _find_session_jsonl(session_id)
     if not filepath:
-        return "(file not found)"
+        return ""
+    try:
+        with open(filepath, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            chunk = min(262144, size)  # last 256KB
+            f.seek(-chunk, 2)
+            data = f.read()
+        for line in reversed(data.split(b"\n")):
+            if not line.strip():
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if obj.get("type") != "assistant":
+                continue
+            msg = obj.get("message", {})
+            if not isinstance(msg, dict):
+                continue
+            text = _extract_text(msg)
+            if text:
+                return _first_paragraph(text)
+    except OSError:
+        pass
+    return ""
+
+
+def _extract_text(msg: dict) -> str:
+    """Extract text content from a message object."""
+    content = msg.get("content", "")
+    if isinstance(content, str) and content:
+        return content.strip()
+    if isinstance(content, list):
+        texts = []
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
+                texts.append(c["text"].strip())
+        return "\n".join(texts) if texts else ""
+    return ""
+
+
+def get_last_messages(session_id: str) -> tuple[str, str]:
+    """Extract the last user message and last assistant response.
+
+    Returns (last_user, last_assistant).
+    """
+    filepath = _find_session_jsonl(session_id)
+    if not filepath:
+        return "(file not found)", "(file not found)"
+    last_user = ""
+    last_assistant = ""
     try:
         with open(filepath, "rb") as f:
             f.seek(0, 2)
@@ -334,27 +407,30 @@ def get_last_user_prompt(session_id: str) -> str:
             data = f.read()
         lines = data.split(b"\n")
         for line in reversed(lines):
+            if last_user and last_assistant:
+                break
             if not line.strip():
                 continue
             try:
                 obj = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if obj.get("type") != "user":
-                continue
-            msg = obj.get("message", {})
-            if not isinstance(msg, dict):
-                continue
-            content = msg.get("content", "")
-            if isinstance(content, str) and content:
-                return content
-            if isinstance(content, list):
-                for c in content:
-                    if isinstance(c, dict) and c.get("type") == "text" and c.get("text"):
-                        return c["text"]
+            msg_type = obj.get("type", "")
+            if msg_type == "user" and not last_user:
+                msg = obj.get("message", {})
+                if isinstance(msg, dict):
+                    text = _extract_text(msg)
+                    if text:
+                        last_user = text
+            elif msg_type == "assistant" and not last_assistant:
+                msg = obj.get("message", {})
+                if isinstance(msg, dict):
+                    text = _extract_text(msg)
+                    if text:
+                        last_assistant = text
     except OSError:
         pass
-    return "(no messages)"
+    return last_user or "(no messages)", last_assistant or "(no response)"
 
 
 def detect_current_project() -> str | None:
@@ -479,9 +555,16 @@ class DetailScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         s = self.session
         first = s.first_prompt if s.first_prompt else "(no prompt)"
-        last = get_last_user_prompt(s.session_id)
-        first_display = first[:500] + ("..." if len(first) > 500 else "")
-        last_display = last[:500] + ("..." if len(last) > 500 else "")
+        last_user, last_assistant = get_last_messages(s.session_id)
+        def _compact(text: str, limit: int = 500) -> str:
+            """Strip leading/trailing whitespace and collapse multiple blank lines."""
+            t = text.strip()
+            t = re.sub(r"\n{3,}", "\n\n", t)
+            return t[:limit] + ("..." if len(t) > limit else "")
+
+        first_display = _compact(first)
+        last_user_display = _compact(last_user)
+        last_asst_display = _compact(last_assistant)
         with Vertical(id="detail-box"):
             yield Static("[b]Session Detail[/b]\n")
             yield Static(f"[dim]Session ID[/]   {s.session_id}")
@@ -491,10 +574,12 @@ class DetailScreen(ModalScreen[None]):
             yield Static(f"[dim]Messages[/]     {s.message_count}")
             yield Static(f"[dim]Created[/]      {format_datetime(s.created_dt)}")
             yield Static(f"[dim]Modified[/]     {format_datetime(s.modified_dt)} ({relative_time(s.modified_dt)})")
-            yield Static("\n[dim]First Prompt[/]")
+            yield Static("\n[dim]Last Assistant Response[/]")
+            yield Static(last_asst_display, classes="prompt-box")
+            yield Static("[dim]Last User Message[/]")
+            yield Static(last_user_display, classes="prompt-box")
+            yield Static("[dim]First Prompt[/]")
             yield Static(first_display, classes="prompt-box")
-            yield Static("[dim]Last Prompt[/]")
-            yield Static(last_display, classes="prompt-box")
 
 
 class SessionPicker(App):
@@ -521,6 +606,7 @@ class SessionPicker(App):
     TITLE = "Claude Resume Picker"
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("ctrl+c", "quit", "Quit", show=False),
         Binding("slash", "focus_search", "Search", key_display="/"),
         Binding("escape", "clear_search", "Clear"),
         Binding("ctrl+t", "toggle_scope", "Scope", key_display="^T"),
@@ -551,7 +637,7 @@ class SessionPicker(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Input(placeholder="Search sessions (project, prompt, branch)...", id="search")
+        yield Input(placeholder="Search sessions (project, prompt, branch, id)...", id="search")
         yield Static("", id="scope-bar")
         if not self.all_sessions:
             yield Static("No sessions found. Start a Claude Code session first.", id="empty")
@@ -562,7 +648,7 @@ class SessionPicker(App):
     def on_mount(self) -> None:
         if self.all_sessions:
             table = self.query_one("#table", DataTable)
-            table.add_columns("Project", "First Prompt", "Msgs", "Branch", "When")
+            table.add_columns("ID", "Project", "Last Response", "Msgs", "Branch", "When")
         if self._init_global:
             self.global_mode = True
         self._apply_filter()
@@ -594,6 +680,7 @@ class SessionPicker(App):
                 if search in s.project_name.lower()
                 or search in s.first_prompt.lower()
                 or search in s.git_branch.lower()
+                or search in s.session_id.lower()
             ]
         else:
             self.filtered_sessions = scope_sessions
@@ -606,10 +693,12 @@ class SessionPicker(App):
         table = self.query_one("#table", DataTable)
         table.clear()
         for s in self.filtered_sessions:
-            prompt = s.first_prompt[:50] + ("..." if len(s.first_prompt) > 50 else "")
+            response = s.last_response[:50] + ("..." if len(s.last_response) > 50 else "")
+            short_id = s.session_id[:8]
             table.add_row(
+                short_id,
                 s.project_name,
-                prompt,
+                response,
                 str(s.message_count),
                 s.git_branch,
                 relative_time(s.modified_dt),

@@ -332,6 +332,12 @@ def _find_session_jsonl(session_id: str) -> Path | None:
     return None
 
 
+def _truncate(text: str, limit: int = 35) -> str:
+    """Collapse whitespace and truncate with ellipsis."""
+    t = " ".join(text.split())
+    return t[:limit] + ("..." if len(t) > limit else "")
+
+
 def _first_paragraph(text: str) -> str:
     """Extract the first non-empty paragraph from text."""
     for para in text.split("\n\n"):
@@ -495,7 +501,7 @@ class ConfirmDeleteScreen(ModalScreen[bool]):
         self.session = session
 
     def compose(self) -> ComposeResult:
-        prompt = self.session.first_prompt[:40] + ("..." if len(self.session.first_prompt) > 40 else "")
+        prompt = _truncate(self.session.first_prompt, 40)
         with Vertical(id="confirm-box"):
             yield Static("[b]Delete session?[/b]\n")
             yield Static(f"{self.session.project_name} / {prompt}")
@@ -617,9 +623,9 @@ class SessionPicker(App):
 
     global_mode: reactive[bool] = reactive(False)
 
-    def __init__(self, initial_global: bool = False) -> None:
+    def __init__(self, initial_global: bool = False, sessions: list[Session] | None = None) -> None:
         super().__init__()
-        self.all_sessions = load_all_sessions()
+        self.all_sessions = sessions if sessions is not None else load_all_sessions()
         self.filtered_sessions: list[Session] = []
         self.selected_session: Session | None = None
         self.current_project = detect_current_project()
@@ -648,7 +654,7 @@ class SessionPicker(App):
     def on_mount(self) -> None:
         if self.all_sessions:
             table = self.query_one("#table", DataTable)
-            table.add_columns("ID", "Project", "Last Response", "Msgs", "Branch", "When")
+            table.add_columns("ID", "Project", "First Prompt", "Last Response", "Msgs", "Branch", "When")
         if self._init_global:
             self.global_mode = True
         self._apply_filter()
@@ -679,6 +685,7 @@ class SessionPicker(App):
                 s for s in scope_sessions
                 if search in s.project_name.lower()
                 or search in s.first_prompt.lower()
+                or search in s.last_response.lower()
                 or search in s.git_branch.lower()
                 or search in s.session_id.lower()
             ]
@@ -693,11 +700,13 @@ class SessionPicker(App):
         table = self.query_one("#table", DataTable)
         table.clear()
         for s in self.filtered_sessions:
-            response = s.last_response[:50] + ("..." if len(s.last_response) > 50 else "")
+            prompt = _truncate(s.first_prompt, 35)
+            response = _truncate(s.last_response, 35) if s.last_response.strip() else ""
             short_id = s.session_id[:8]
             table.add_row(
                 short_id,
                 s.project_name,
+                prompt,
                 response,
                 str(s.message_count),
                 s.git_branch,
@@ -764,10 +773,15 @@ class SessionPicker(App):
         session = self.filtered_sessions[row_idx]
 
         def on_confirm(result: bool) -> None:
-            if result and delete_session(session):
+            if not result:
+                return
+            if delete_session(session):
                 self.all_sessions = [s for s in self.all_sessions if s.session_id != session.session_id]
                 _save_cache(self.all_sessions)
                 self._apply_filter()
+                self.notify("Session deleted", severity="information")
+            else:
+                self.notify("Failed to delete session", severity="error")
 
         self.push_screen(ConfirmDeleteScreen(session), on_confirm)
 
@@ -787,14 +801,23 @@ def main() -> None:
                         help="Start in local (current project) mode")
     parser.add_argument("--no-cache", action="store_true",
                         help="Force reload sessions without cache")
+    parser.add_argument("--list", action="store_true",
+                        help="List sessions as plain text (no TUI)")
     args, extra_args = parser.parse_known_args()
 
-    if args.no_cache:
-        load_all_sessions(no_cache=True)
+    sessions = load_all_sessions(no_cache=args.no_cache)
 
     initial_global = args.global_mode and not args.local_mode
 
-    app = SessionPicker(initial_global=initial_global)
+    if args.list:
+        current_project = detect_current_project()
+        if not initial_global and current_project:
+            sessions = [s for s in sessions if s.project_path == current_project]
+        for s in sessions:
+            print(f"{s.session_id[:8]}  {s.project_name:<20s}  {_truncate(s.first_prompt, 40):<43s}  {relative_time(s.modified_dt)}")
+        sys.exit(0)
+
+    app = SessionPicker(initial_global=initial_global, sessions=sessions)
     app.run()
 
     if app.selected_session:

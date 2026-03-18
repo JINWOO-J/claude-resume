@@ -619,11 +619,12 @@ class SessionPicker(App):
         Binding("ctrl+s", "cycle_sort", "Sort", key_display="^S"),
         Binding("space", "show_detail", "Detail", key_display="Space"),
         Binding("d", "delete_session", "Delete", key_display="d"),
+        Binding("i", "toggle_full_id", "Full ID", key_display="i"),
     ]
 
     global_mode: reactive[bool] = reactive(False)
 
-    def __init__(self, initial_global: bool = False, sessions: list[Session] | None = None) -> None:
+    def __init__(self, initial_global: bool = False, sessions: list[Session] | None = None, full_id: bool = False) -> None:
         super().__init__()
         self.all_sessions = sessions if sessions is not None else load_all_sessions()
         self.filtered_sessions: list[Session] = []
@@ -631,6 +632,7 @@ class SessionPicker(App):
         self.current_project = detect_current_project()
         self.sort_mode = "modified"
         self._init_global = initial_global
+        self.full_id = full_id
         if not self._init_global and self.current_project:
             local = [s for s in self.all_sessions if s.project_path == self.current_project]
             if not local:
@@ -702,9 +704,9 @@ class SessionPicker(App):
         for s in self.filtered_sessions:
             prompt = _truncate(s.first_prompt, 35)
             response = _truncate(s.last_response, 35) if s.last_response.strip() else ""
-            short_id = s.session_id[:8]
+            sid = s.session_id if self.full_id else s.session_id[:8]
             table.add_row(
-                short_id,
+                sid,
                 s.project_name,
                 prompt,
                 response,
@@ -785,6 +787,10 @@ class SessionPicker(App):
 
         self.push_screen(ConfirmDeleteScreen(session), on_confirm)
 
+    def action_toggle_full_id(self) -> None:
+        self.full_id = not self.full_id
+        self._populate_table()
+
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -803,6 +809,8 @@ def main() -> None:
                         help="Force reload sessions without cache")
     parser.add_argument("--list", action="store_true",
                         help="List sessions as plain text (no TUI)")
+    parser.add_argument("--full-id", action="store_true",
+                        help="Show full session ID instead of short 8-char ID")
     args, extra_args = parser.parse_known_args()
 
     sessions = load_all_sessions(no_cache=args.no_cache)
@@ -814,10 +822,11 @@ def main() -> None:
         if not initial_global and current_project:
             sessions = [s for s in sessions if s.project_path == current_project]
         for s in sessions:
-            print(f"{s.session_id[:8]}  {s.project_name:<20s}  {_truncate(s.first_prompt, 40):<43s}  {relative_time(s.modified_dt)}")
+            sid = s.session_id if args.full_id else s.session_id[:8]
+            print(f"{sid}  {s.project_name:<20s}  {_truncate(s.first_prompt, 40):<43s}  {relative_time(s.modified_dt)}")
         sys.exit(0)
 
-    app = SessionPicker(initial_global=initial_global, sessions=sessions)
+    app = SessionPicker(initial_global=initial_global, sessions=sessions, full_id=args.full_id)
     app.run()
 
     if app.selected_session:

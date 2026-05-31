@@ -36,6 +36,11 @@ class Session:
     created: str  # ISO format string for cache serialization
     modified: str  # ISO format string
     last_response: str = ""
+    entrypoint: str = "cli"  # "cli" = main session, "sdk-cli" = agent/subagent session
+
+    @property
+    def is_agent(self) -> bool:
+        return self.entrypoint == "sdk-cli"
 
     @property
     def created_dt(self) -> datetime:
@@ -153,6 +158,7 @@ def _load_from_index(index_file: Path) -> list[Session]:
             git_branch=entry.get("gitBranch", ""),
             created=entry["created"],
             modified=entry["modified"],
+            entrypoint=entry.get("entrypoint", "cli"),
         ))
     return sessions
 
@@ -195,6 +201,7 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
     first_prompt = ""
     git_branch = ""
     cwd = ""
+    entrypoint = ""
     first_ts = None
     msg_count = 0
 
@@ -214,6 +221,8 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
                     git_branch = obj.get("gitBranch", "")
                 if not cwd:
                     cwd = obj.get("cwd", "")
+                if not entrypoint:
+                    entrypoint = obj.get("entrypoint", "")
                 if first_ts is None:
                     ts = obj.get("timestamp")
                     if ts:
@@ -263,6 +272,7 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
         git_branch=git_branch,
         created=first_ts,
         modified=last_ts,
+        entrypoint=entrypoint or "cli",
     )
 
 
@@ -620,11 +630,14 @@ class SessionPicker(App):
         Binding("space", "show_detail", "Detail", key_display="Space"),
         Binding("d", "delete_session", "Delete", key_display="d"),
         Binding("i", "toggle_full_id", "Full ID", key_display="i"),
+        Binding("a", "toggle_agents", "Agents", key_display="a"),
     ]
 
     global_mode: reactive[bool] = reactive(False)
+    show_agents: reactive[bool] = reactive(False)
 
-    def __init__(self, initial_global: bool = False, sessions: list[Session] | None = None, full_id: bool = False) -> None:
+    def __init__(self, initial_global: bool = False, sessions: list[Session] | None = None,
+                 full_id: bool = False, show_agents: bool = False) -> None:
         super().__init__()
         self.all_sessions = sessions if sessions is not None else load_all_sessions()
         self.filtered_sessions: list[Session] = []
@@ -633,15 +646,21 @@ class SessionPicker(App):
         self.sort_mode = "modified"
         self._init_global = initial_global
         self.full_id = full_id
+        self._init_show_agents = show_agents
         if not self._init_global and self.current_project:
-            local = [s for s in self.all_sessions if s.project_path == self.current_project]
+            local = [s for s in self.all_sessions
+                     if s.project_path == self.current_project and not s.is_agent]
             if not local:
                 self._init_global = True
 
     def _get_scope_sessions(self) -> list[Session]:
         if self.global_mode or not self.current_project:
-            return list(self.all_sessions)
-        return [s for s in self.all_sessions if s.project_path == self.current_project]
+            sessions = list(self.all_sessions)
+        else:
+            sessions = [s for s in self.all_sessions if s.project_path == self.current_project]
+        if not self.show_agents:
+            sessions = [s for s in sessions if not s.is_agent]
+        return sessions
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -659,6 +678,8 @@ class SessionPicker(App):
             table.add_columns("ID", "Project", "First Prompt", "Last Response", "Msgs", "Branch", "When")
         if self._init_global:
             self.global_mode = True
+        if self._init_show_agents:
+            self.show_agents = True
         self._apply_filter()
         if self.all_sessions:
             self.query_one("#table", DataTable).focus()
@@ -674,7 +695,8 @@ class SessionPicker(App):
             scope = Path(self.current_project).name
         count = len(self.filtered_sessions)
         sort_label = SORT_LABELS[self.sort_mode]
-        bar.update(f" [{scope}] {count} sessions | Sort: {sort_label}  (^T: scope  ^S: sort)")
+        agents = "on" if self.show_agents else "off"
+        bar.update(f" [{scope}] {count} sessions | Sort: {sort_label} | Agents: {agents}  (^T: scope  ^S: sort  a: agents)")
 
     def _apply_filter(self) -> None:
         scope_sessions = self._get_scope_sessions()
@@ -724,6 +746,14 @@ class SessionPicker(App):
         if self.is_mounted:
             self._apply_filter()
 
+    def watch_show_agents(self, value: bool) -> None:
+        try:
+            _ = self.screen
+        except Exception:
+            return
+        if self.is_mounted:
+            self._apply_filter()
+
     @on(Input.Changed, "#search")
     def filter_sessions(self, event: Input.Changed) -> None:
         self._apply_filter()
@@ -750,6 +780,9 @@ class SessionPicker(App):
 
     def action_toggle_scope(self) -> None:
         self.global_mode = not self.global_mode
+
+    def action_toggle_agents(self) -> None:
+        self.show_agents = not self.show_agents
 
     def action_cycle_sort(self) -> None:
         idx = SORT_MODES.index(self.sort_mode)
@@ -811,6 +844,8 @@ def main() -> None:
                         help="List sessions as plain text (no TUI)")
     parser.add_argument("--full-id", action="store_true",
                         help="Show full session ID instead of short 8-char ID")
+    parser.add_argument("--include-agents", "-a", action="store_true",
+                        help="Include SDK/agent (subagent) sessions, hidden by default")
     args, extra_args = parser.parse_known_args()
 
     sessions = load_all_sessions(no_cache=args.no_cache)
@@ -821,12 +856,15 @@ def main() -> None:
         current_project = detect_current_project()
         if not initial_global and current_project:
             sessions = [s for s in sessions if s.project_path == current_project]
+        if not args.include_agents:
+            sessions = [s for s in sessions if not s.is_agent]
         for s in sessions:
             sid = s.session_id if args.full_id else s.session_id[:8]
             print(f"{sid}  {s.project_name:<20s}  {_truncate(s.first_prompt, 40):<43s}  {relative_time(s.modified_dt)}")
         sys.exit(0)
 
-    app = SessionPicker(initial_global=initial_global, sessions=sessions, full_id=args.full_id)
+    app = SessionPicker(initial_global=initial_global, sessions=sessions,
+                        full_id=args.full_id, show_agents=args.include_agents)
     app.run()
 
     if app.selected_session:

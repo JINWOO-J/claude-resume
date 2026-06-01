@@ -4,8 +4,10 @@ A TUI session picker for [Claude Code](https://docs.anthropic.com/en/docs/claude
 
 Browse, search, and resume previous Claude Code sessions from any project — without remembering session IDs.
 
-![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)
-![License: MIT](https://img.shields.io/badge/license-MIT-green)
+[![PyPI version](https://img.shields.io/pypi/v/claude-resume)](https://pypi.org/project/claude-resume/)
+[![Python](https://img.shields.io/pypi/pyversions/claude-resume)](https://pypi.org/project/claude-resume/)
+[![Downloads](https://img.shields.io/pypi/dm/claude-resume)](https://pypi.org/project/claude-resume/)
+[![License: MIT](https://img.shields.io/pypi/l/claude-resume)](LICENSE)
 
 ## Features
 

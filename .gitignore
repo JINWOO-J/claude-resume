@@ -1,6 +1,9 @@
 # OMC state
 .omc/
 
+# xm tooling state
+.xm/
+
 # Python
 __pycache__/
 *.pyc

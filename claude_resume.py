@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -20,6 +21,7 @@ from textual.reactive import reactive
 from textual.screen import ModalScreen
 from textual.containers import Horizontal
 from textual.widgets import Button, DataTable, Footer, Header, Input, Static
+from rich.text import Text
 
 CACHE_DIR = Path.home() / ".cache" / "claude-resume"
 CACHE_FILE = CACHE_DIR / "sessions.json"
@@ -459,6 +461,52 @@ def _truncate(text: str, limit: int = 35) -> str:
     return t[:limit] + ("..." if len(t) > limit else "")
 
 
+# Leading filler that hides the actual topic ("can you please fix ..." → "fix ...").
+_FILLER_RE = re.compile(
+    r"^(?:please|pls|can you|could you|would you|will you|help me( to)?|"
+    r"i want to|i'd like to|i would like to|let'?s|let me|hey|hi|so|okay|ok)\b[\s,]*",
+    re.I,
+)
+
+
+def _strip_filler(text: str) -> str:
+    """Drop leading conversational filler so the topic leads the column."""
+    t = text.strip()
+    prev = None
+    while t and t != prev:
+        prev = t
+        t = _FILLER_RE.sub("", t, count=1).strip()
+    return t or text.strip()
+
+
+def _truncate_middle(text: str, limit: int = 40) -> str:
+    """Collapse whitespace and truncate with a middle ellipsis (head-weighted).
+
+    Keeps the topic start and the tail visible so near-identical openings stay
+    distinguishable by their ending.
+    """
+    t = " ".join(text.split())
+    if len(t) <= limit:
+        return t
+    if limit <= 3:
+        return t[:limit]
+    keep = limit - 1  # one char for the ellipsis
+    head = keep * 2 // 3
+    tail = keep - head
+    return t[:head] + "…" + t[-tail:]
+
+
+def _recency_style(age_days: float) -> str:
+    """Rich style for the When column, brighter the more recent."""
+    if age_days < 1:
+        return "bold green"
+    if age_days < 7:
+        return ""
+    if age_days < 30:
+        return "dim"
+    return "dim italic"
+
+
 def _first_paragraph(text: str) -> str:
     """Extract the first non-empty paragraph from text."""
     for para in text.split("\n\n"):
@@ -571,8 +619,25 @@ def detect_current_project() -> str | None:
 # Sort modes
 # ---------------------------------------------------------------------------
 
-SORT_MODES = ["modified", "messages", "project"]
-SORT_LABELS = {"modified": "Modified", "messages": "Messages", "project": "Project"}
+SORT_MODES = ["resume", "modified", "messages", "project"]
+SORT_LABELS = {"resume": "Resumable", "modified": "Modified",
+               "messages": "Messages", "project": "Project"}
+
+
+def resumability_score(s: Session, now: datetime | None = None) -> float:
+    """Rank a session by how worth resuming it is: human depth × recency.
+
+    A one-turn question or a session untouched for weeks scores low; a long,
+    recently-active session scores high. Non-human turns count a fraction of a
+    genuine turn so a session padded with tool results doesn't outrank a real
+    conversation.
+    """
+    now = now or datetime.now(timezone.utc)
+    age_days = max(0.0, (now - s.modified_dt).total_seconds() / 86400.0)
+    recency = math.exp(-age_days / 14.0)  # ~0.61 at 1wk, ~0.37 at 2wk
+    other = max(0, s.message_count - s.human_msgs)
+    depth = s.human_msgs + 0.2 * other
+    return (depth + 1.0) * recency
 
 
 def sort_sessions(sessions: list[Session], mode: str) -> list[Session]:
@@ -580,8 +645,11 @@ def sort_sessions(sessions: list[Session], mode: str) -> list[Session]:
         return sorted(sessions, key=lambda s: s.message_count, reverse=True)
     elif mode == "project":
         return sorted(sessions, key=lambda s: (s.project_name.lower(), s.modified_dt), reverse=False)
-    else:  # modified
+    elif mode == "modified":
         return sorted(sessions, key=lambda s: s.modified_dt, reverse=True)
+    else:  # resume (default)
+        now = datetime.now(timezone.utc)
+        return sorted(sessions, key=lambda s: resumability_score(s, now), reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -754,7 +822,7 @@ class SessionPicker(App):
         self.filtered_sessions: list[Session] = []
         self.selected_session: Session | None = None
         self.current_project = detect_current_project()
-        self.sort_mode = "modified"
+        self.sort_mode = "resume"
         self._init_global = initial_global
         self.full_id = full_id
         self._init_show_agents = show_agents
@@ -834,18 +902,35 @@ class SessionPicker(App):
     def _populate_table(self) -> None:
         table = self.query_one("#table", DataTable)
         table.clear()
+        now = datetime.now(timezone.utc)
+        group_sort = self.sort_mode == "project"
+        if group_sort:
+            counts: dict[str, int] = {}
+            for s in self.filtered_sessions:
+                counts[s.project_name] = counts.get(s.project_name, 0) + 1
+        prev_project = None
         for s in self.filtered_sessions:
-            prompt = _truncate(s.first_prompt, 35)
+            prompt = _truncate_middle(_strip_filler(s.first_prompt), 40)
             response = _truncate(s.last_response, 35) if s.last_response.strip() else ""
             sid = s.session_id if self.full_id else s.session_id[:8]
+            if group_sort:
+                if s.project_name != prev_project:
+                    project_cell = Text(f"{s.project_name} ({counts[s.project_name]})", style="bold")
+                    prev_project = s.project_name
+                else:
+                    project_cell = Text(s.project_name, style="dim")
+            else:
+                project_cell = s.project_name
+            age_days = (now - s.modified_dt).total_seconds() / 86400.0
+            when_cell = Text(relative_time(s.modified_dt), style=_recency_style(age_days))
             table.add_row(
                 sid,
-                s.project_name,
+                project_cell,
                 prompt,
                 response,
                 str(s.message_count),
                 s.git_branch,
-                relative_time(s.modified_dt),
+                when_cell,
                 key=s.session_id,
             )
 

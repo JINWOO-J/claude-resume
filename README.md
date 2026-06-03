@@ -15,7 +15,9 @@ Browse, search, and resume previous Claude Code sessions from any project — wi
 - **Real-time search** — Filter by project name, first prompt, or git branch
 - **Project scoping** — Toggle between current project and all projects (`Ctrl+T`)
 - **Agent filtering** — Hides agent/automation sessions (subagents, dispatched tasks, slash-command, heartbeat) by default; toggle with `a`
-- **Sort modes** — Cycle through Modified / Messages / Project (`Ctrl+S`)
+- **Resumability ranking** — Default sort surfaces the sessions most worth resuming (human depth × recency); demotes one-turn and stale sessions
+- **Sort modes** — Cycle through Resumable / Modified / Messages / Project (`Ctrl+S`)
+- **Readable rows** — Strips filler openings ("can you please…"), middle-truncates long prompts, color-codes recency, and groups by project (in Project sort)
 - **Session detail** — View full metadata with `Space`
 - **Delete sessions** — Remove old sessions with `d`
 - **Auto cd** — Automatically changes to the session's project directory before resuming
@@ -70,7 +72,7 @@ Examples:
 | `Escape` | Clear search |
 | `Ctrl+T` | Toggle scope (current project / all) |
 | `a` | Toggle agent/automation sessions (hidden by default) |
-| `Ctrl+S` | Cycle sort (Modified / Messages / Project) |
+| `Ctrl+S` | Cycle sort (Resumable / Modified / Messages / Project) |
 | `d` | Delete session (with confirmation) |
 | `q` | Quit |
 

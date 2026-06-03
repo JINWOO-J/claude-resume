@@ -23,6 +23,8 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 
 CACHE_DIR = Path.home() / ".cache" / "claude-resume"
 CACHE_FILE = CACHE_DIR / "sessions.json"
+# Bump when the Session schema or extraction logic changes, to invalidate stale caches.
+_SCHEMA_VERSION = "2"
 
 
 @dataclass
@@ -37,10 +39,11 @@ class Session:
     modified: str  # ISO format string
     last_response: str = ""
     entrypoint: str = "cli"  # "cli" = main session, "sdk-cli" = agent/subagent session
+    agent: bool = False  # content-based: no genuine human first prompt (dispatch/automation)
 
     @property
     def is_agent(self) -> bool:
-        return self.entrypoint == "sdk-cli"
+        return self.agent or self.entrypoint == "sdk-cli"
 
     @property
     def created_dt(self) -> datetime:
@@ -95,7 +98,7 @@ def _projects_fingerprint() -> str:
                 parts.append(f"{d.name}:{mtime:.0f}:{jsonl_count}")
             except OSError:
                 pass
-    return hashlib.md5("|".join(parts).encode()).hexdigest()
+    return hashlib.md5((_SCHEMA_VERSION + "|" + "|".join(parts)).encode()).hexdigest()
 
 
 def _load_cache() -> list[Session] | None:
@@ -149,16 +152,20 @@ def _load_from_index(index_file: Path) -> list[Session]:
             _parse_iso(entry["modified"])
         except (KeyError, ValueError):
             continue
+        raw_prompt = entry.get("firstPrompt", "")
+        display, is_genuine = _classify_prompt(raw_prompt) if raw_prompt else ("", False)
+        entrypoint = entry.get("entrypoint", "cli")
         sessions.append(Session(
             session_id=session_id,
             project_name=project_name,
             project_path=project_path,
-            first_prompt=entry.get("firstPrompt", ""),
+            first_prompt=display or raw_prompt,
             message_count=entry.get("messageCount", 0),
             git_branch=entry.get("gitBranch", ""),
             created=entry["created"],
             modified=entry["modified"],
-            entrypoint=entry.get("entrypoint", "cli"),
+            entrypoint=entrypoint,
+            agent=(entrypoint == "sdk-cli") or not is_genuine,
         ))
     return sessions
 
@@ -173,6 +180,94 @@ def _extract_first_user_prompt(msg: dict) -> str | None:
             if isinstance(block, dict) and block.get("type") == "text":
                 return block.get("text", "")
     return None
+
+
+_CMD_NAME_RE = re.compile(r"<command-name>\s*(.*?)\s*</command-name>", re.S)
+_CMD_ARGS_RE = re.compile(r"<command-args>\s*(.*?)\s*</command-args>", re.S)
+
+# Dispatch prompts emitted by agent-orchestration frameworks (term-mesh,
+# sre-agent, …) rather than a human. Curated from observed transcripts; extend
+# as new formats appear. Start-of-prompt prefixes:
+_AGENT_PREFIXES = (
+    "You are a team agent",           # term-mesh worker role assignment
+    "## Task Capsule",                # term-mesh task dispatch
+    "IME ROUTING REQUEST",            # term-mesh routing dispatch
+    "Leader ping",                    # leader heartbeat
+    "You did NOT actually run",       # agent self-correction nudge
+    "[Request interrupted by user",   # interrupt marker — no instruction given
+    "에이전트 핑퐁",                    # ping-pong benchmark (Korean)
+)
+
+# Substrings matched anywhere (they can trail stray human text / whitespace):
+_AGENT_SUBSTRINGS = (
+    "[REQUIRED FINAL STEP",  # team-dispatch task wrapper
+    "--agent-id",            # `claude --agent-id …` agent launcher
+    "핑퐁 체인",              # ping-pong relay benchmark (Korean)
+)
+
+# Agent heartbeat openers: bare ping/pong, PINGPONG, an uppercase PING opener,
+# or ping/pong followed by punctuation or a heartbeat keyword. Tuned to leave a
+# real human task like "ping the staging server" genuine.
+_HEARTBEAT_RE = re.compile(
+    r"ping\s*[.,:#)\-—]"               # "PING.", "PING —", "PING #1", "PING:"
+    r"|ping\s+(?:from|check|connectivity|test)\b",  # "PING from", "Ping check"
+    re.I,
+)
+
+# System/command wrapper prefixes that are machine-emitted, not a human typing.
+_SYSTEM_WRAPPER_PREFIXES = (
+    "<local-command-stdout>",
+    "<local-command-stderr>",
+    "<local-command-caveat>",
+    "<command-message>",
+    "<command-name>",
+    "<teammate-message",  # term-mesh agent-to-agent dispatch
+)
+
+
+def _unwrap_command(text: str) -> tuple[str, str] | None:
+    """If text is a slash-command wrapper, return (name, args); else None."""
+    m = _CMD_NAME_RE.search(text)
+    if not m:
+        return None
+    a = _CMD_ARGS_RE.search(text)
+    return m.group(1).strip(), (a.group(1).strip() if a else "")
+
+
+def _is_heartbeat(text: str) -> bool:
+    low = text.lower()
+    if low in ("ping", "pong") or low.startswith("pingpong"):
+        return True
+    if text.startswith("PING"):  # uppercase opener is an agent ping, not prose
+        return True
+    return bool(_HEARTBEAT_RE.match(text))
+
+
+def _classify_prompt(text: str) -> tuple[str, bool]:
+    """Map a user message body to (display_text, is_genuine).
+
+    is_genuine means a human actually typed a content instruction. Slash
+    commands (control plane: ``/watch``, ``/lib-mesh``, ``/clear`` …), injected
+    dispatch/heartbeat prompts, command output, and empty bodies are all
+    non-genuine — they are automation or housekeeping, not a human starting a
+    session. Such sessions are hidden by default but kept (toggle with ``a``).
+    """
+    text = text.strip()
+    if not text:
+        return "", False
+    cmd = _unwrap_command(text)
+    if cmd is not None:
+        name, args = cmd
+        return f"{name} {args}".strip(), False
+    if text.startswith(_AGENT_PREFIXES):
+        return text, False
+    if any(m in text for m in _AGENT_SUBSTRINGS):
+        return text, False
+    if _is_heartbeat(text):
+        return text, False
+    if text.startswith(_SYSTEM_WRAPPER_PREFIXES):
+        return text, False
+    return text, True
 
 
 def _read_last_line(filepath: Path) -> str | None:
@@ -198,7 +293,8 @@ def _read_last_line(filepath: Path) -> str | None:
 def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
     """Load session metadata from a JSONL transcript file."""
     session_id = jsonl_file.stem
-    first_prompt = ""
+    genuine = ""    # first genuine human instruction (display text)
+    fallback = ""   # first non-genuine user text (bare command / injected dispatch)
     git_branch = ""
     cwd = ""
     entrypoint = ""
@@ -235,17 +331,26 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
                 t = obj.get("type", "")
                 if t in ("user", "assistant"):
                     msg_count += 1
-                if t == "user" and not first_prompt:
+                if t == "user" and not genuine and not obj.get("isMeta", False):
                     msg = obj.get("message", {})
                     if isinstance(msg, dict):
                         text = _extract_first_user_prompt(msg)
-                        if text:
-                            first_prompt = text
+                        if text and text.strip():
+                            display, is_genuine = _classify_prompt(text)
+                            if is_genuine:
+                                genuine = display
+                            elif not fallback:
+                                fallback = display
     except OSError:
         return None
 
+    first_prompt = genuine or fallback
     if first_ts is None or not first_prompt:
         return None
+
+    # Agent (hidden by default) when launched as a subagent, or when no human
+    # ever typed a genuine first instruction (dispatch / heartbeat / automation).
+    is_agent = (entrypoint == "sdk-cli") or not genuine
 
     # Get last timestamp from end of file
     last_ts = first_ts
@@ -273,6 +378,7 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
         created=first_ts,
         modified=last_ts,
         entrypoint=entrypoint or "cli",
+        agent=is_agent,
     )
 
 
@@ -845,7 +951,8 @@ def main() -> None:
     parser.add_argument("--full-id", action="store_true",
                         help="Show full session ID instead of short 8-char ID")
     parser.add_argument("--include-agents", "-a", action="store_true",
-                        help="Include SDK/agent (subagent) sessions, hidden by default")
+                        help="Include agent/automation sessions (subagents, dispatch, "
+                             "slash-command, heartbeat), hidden by default")
     args, extra_args = parser.parse_known_args()
 
     sessions = load_all_sessions(no_cache=args.no_cache)

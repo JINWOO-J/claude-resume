@@ -14,7 +14,7 @@ Browse, search, and resume previous Claude Code sessions from any project — wi
 - **Session discovery** — Scans `~/.claude/projects/` for all sessions across every project
 - **Real-time search** — Filter by project name, first prompt, or git branch
 - **Project scoping** — Toggle between current project and all projects (`Ctrl+T`)
-- **Agent filtering** — Hides SDK/subagent sessions by default; toggle with `a`
+- **Agent filtering** — Hides agent/automation sessions (subagents, dispatched tasks, slash-command, heartbeat) by default; toggle with `a`
 - **Sort modes** — Cycle through Modified / Messages / Project (`Ctrl+S`)
 - **Session detail** — View full metadata with `Space`
 - **Delete sessions** — Remove old sessions with `d`
@@ -50,7 +50,7 @@ claude-resume [OPTIONS] [-- CLAUDE_ARGS...]
 Options:
   -g, --global         Start in global (all projects) mode
   -l, --local          Start in local (current project) mode
-  -a, --include-agents Include SDK/agent (subagent) sessions, hidden by default
+  -a, --include-agents Include agent/automation sessions, hidden by default
   --no-cache           Force reload sessions without cache
 
 Examples:
@@ -69,7 +69,7 @@ Examples:
 | `/` | Focus search input |
 | `Escape` | Clear search |
 | `Ctrl+T` | Toggle scope (current project / all) |
-| `a` | Toggle agent/subagent sessions (hidden by default) |
+| `a` | Toggle agent/automation sessions (hidden by default) |
 | `Ctrl+S` | Cycle sort (Modified / Messages / Project) |
 | `d` | Delete session (with confirmation) |
 | `q` | Quit |
@@ -78,7 +78,7 @@ Examples:
 
 1. Scans `~/.claude/projects/*/sessions-index.json` for indexed sessions
 2. Falls back to parsing `.jsonl` transcript files (reads first 50 lines + last line for efficiency)
-3. Filters out sidechains and sessions without user messages
+3. Filters out sidechains; classifies a session as agent/automation when no genuine human first prompt exists (slash commands, dispatched tasks, heartbeats, command output are not "genuine"), hiding those by default
 4. On selection, `cd`s to the session's project directory and `exec`s `claude --resume <id>`
 
 ## Requirements

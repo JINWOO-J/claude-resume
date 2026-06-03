@@ -21,7 +21,7 @@ Browse, search, and resume previous Claude Code sessions from any project — wi
 - **Session detail** — View full metadata with `Space`
 - **Delete sessions** — Remove old sessions with `d`
 - **Auto cd** — Automatically changes to the session's project directory before resuming
-- **Fast cache** — Fingerprint-based cache for instant startup after first load
+- **Incremental cache** — Per-file cache; only changed transcripts are re-parsed, so a new session elsewhere no longer triggers a full rescan
 - **CLI passthrough** — Extra arguments are forwarded to `claude`
 
 ## Installation
@@ -79,7 +79,7 @@ Examples:
 ## How It Works
 
 1. Scans `~/.claude/projects/*/sessions-index.json` for indexed sessions
-2. Falls back to parsing `.jsonl` transcript files (reads first 50 lines + last line for efficiency)
+2. Parses `.jsonl` transcript files in a single pass (exact message counts and first prompt), caching each file by `(mtime, size)` so unchanged transcripts are never re-read
 3. Filters out sidechains; classifies a session as agent/automation when no genuine human first prompt exists (slash commands, dispatched tasks, heartbeats, command output are not "genuine"), hiding those by default
 4. On selection, `cd`s to the session's project directory and `exec`s `claude --resume <id>`
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
@@ -26,7 +25,7 @@ from rich.text import Text
 CACHE_DIR = Path.home() / ".cache" / "claude-resume"
 CACHE_FILE = CACHE_DIR / "sessions.json"
 # Bump when the Session schema or extraction logic changes, to invalidate stale caches.
-_SCHEMA_VERSION = "4"
+_SCHEMA_VERSION = "5"
 
 # Cap on the cached human-message search blob, in characters, per session.
 _SEARCH_TEXT_CAP = 1000
@@ -94,44 +93,42 @@ def _parse_iso(s: str) -> datetime:
 # Cache
 # ---------------------------------------------------------------------------
 
-def _projects_fingerprint() -> str:
-    """Build a fingerprint from project dirs' mtime + jsonl file counts."""
-    claude_dir = Path.home() / ".claude" / "projects"
-    if not claude_dir.exists():
-        return ""
-    parts = []
-    for d in sorted(claude_dir.iterdir()):
-        if d.is_dir():
-            try:
-                mtime = d.stat().st_mtime
-                jsonl_count = sum(1 for _ in d.glob("*.jsonl"))
-                parts.append(f"{d.name}:{mtime:.0f}:{jsonl_count}")
-            except OSError:
-                pass
-    return hashlib.md5((_SCHEMA_VERSION + "|" + "|".join(parts)).encode()).hexdigest()
+def _read_cache() -> dict[str, dict]:
+    """Return the per-file cache map {abs_path: {mtime, size, session}} or {}.
 
-
-def _load_cache() -> list[Session] | None:
-    """Load sessions from cache if fingerprint matches."""
+    Keyed by jsonl path with its (mtime, size) so an unchanged file's parsed
+    Session can be reused and only changed/new files re-parsed.
+    """
     if not CACHE_FILE.exists():
-        return None
+        return {}
     try:
         data = json.loads(CACHE_FILE.read_text())
-        if data.get("fingerprint") != _projects_fingerprint():
-            return None
-        return [Session(**e) for e in data["sessions"]]
-    except (json.JSONDecodeError, OSError, KeyError, TypeError):
-        return None
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if data.get("schema") != _SCHEMA_VERSION:
+        return {}  # schema changed → drop stale cache
+    files = data.get("files")
+    return files if isinstance(files, dict) else {}
+
+
+def _write_cache(files: dict[str, dict]) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    data = {"schema": _SCHEMA_VERSION, "files": files}
+    CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False))
 
 
 def _save_cache(sessions: list[Session]) -> None:
-    """Save sessions to cache with fingerprint."""
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    data = {
-        "fingerprint": _projects_fingerprint(),
-        "sessions": [asdict(s) for s in sessions],
+    """Persist after an in-place mutation (e.g. delete): keep surviving ids only.
+
+    Reuses the cached (mtime, size, session) of survivors so no file is re-read.
+    """
+    keep = {s.session_id for s in sessions}
+    files = {
+        path: entry for path, entry in _read_cache().items()
+        if isinstance(entry.get("session"), dict)
+        and entry["session"].get("session_id") in keep
     }
-    CACHE_FILE.write_text(json.dumps(data, ensure_ascii=False))
+    _write_cache(files)
 
 
 # ---------------------------------------------------------------------------
@@ -403,47 +400,64 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
 
 
 def load_all_sessions(no_cache: bool = False) -> list[Session]:
-    # Try cache first
-    if not no_cache:
-        cached = _load_cache()
-        if cached is not None:
-            return cached
-
     claude_dir = Path.home() / ".claude" / "projects"
     if not claude_dir.exists():
         return []
 
+    cache = {} if no_cache else _read_cache()
     sessions: list[Session] = []
-    indexed_session_ids: set[str] = set()
+    seen_ids: set[str] = set()
+    new_files: dict[str, dict] = {}
 
-    # 1) Load from sessions-index.json (preferred, has accurate counts)
+    # 1) Load from sessions-index.json (preferred, has accurate counts).
+    #    Rare in practice and not incrementally cached.
     for index_file in claude_dir.glob("*/sessions-index.json"):
         for s in _load_from_index(index_file):
+            if s.session_id in seen_ids:
+                continue
+            if not s.last_response:
+                s.last_response = _get_last_assistant_response(s.session_id)
             sessions.append(s)
-            indexed_session_ids.add(s.session_id)
+            seen_ids.add(s.session_id)
 
-    # 2) Scan JSONL files not covered by any index
+    # 2) Scan JSONL files, reusing cached entries for files that haven't changed.
     for project_dir in claude_dir.iterdir():
         if not project_dir.is_dir():
             continue
         for jsonl_file in project_dir.glob("*.jsonl"):
             sid = jsonl_file.stem
-            if sid in indexed_session_ids:
+            if sid in seen_ids:
                 continue
-            session = _load_from_jsonl(jsonl_file, project_dir)
+            path = str(jsonl_file)
+            try:
+                st = jsonl_file.stat()
+            except OSError:
+                continue
+
+            session: Session | None = None
+            entry = cache.get(path)
+            if (entry and entry.get("mtime") == st.st_mtime
+                    and entry.get("size") == st.st_size
+                    and isinstance(entry.get("session"), dict)):
+                try:
+                    session = Session(**entry["session"])  # reuse: no re-read
+                except (TypeError, ValueError):
+                    session = None
+            if session is None:
+                session = _load_from_jsonl(jsonl_file, project_dir)
+                if session and not session.last_response:
+                    session.last_response = _get_last_assistant_response(session.session_id)
+
             if session:
                 sessions.append(session)
-                indexed_session_ids.add(session.session_id)
-
-    # Fill last_response for each session
-    for s in sessions:
-        if not s.last_response:
-            s.last_response = _get_last_assistant_response(s.session_id)
+                seen_ids.add(sid)
+                new_files[path] = {"mtime": st.st_mtime, "size": st.st_size,
+                                   "session": asdict(session)}
 
     sessions.sort(key=lambda s: _parse_iso(s.modified), reverse=True)
 
-    # Save cache
-    _save_cache(sessions)
+    if not no_cache:
+        _write_cache(new_files)
 
     return sessions
 

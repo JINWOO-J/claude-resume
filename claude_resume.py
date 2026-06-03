@@ -24,7 +24,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Static
 CACHE_DIR = Path.home() / ".cache" / "claude-resume"
 CACHE_FILE = CACHE_DIR / "sessions.json"
 # Bump when the Session schema or extraction logic changes, to invalidate stale caches.
-_SCHEMA_VERSION = "2"
+_SCHEMA_VERSION = "3"
 
 
 @dataclass
@@ -40,6 +40,7 @@ class Session:
     last_response: str = ""
     entrypoint: str = "cli"  # "cli" = main session, "sdk-cli" = agent/subagent session
     agent: bool = False  # content-based: no genuine human first prompt (dispatch/automation)
+    human_msgs: int = 0  # non-meta user messages a human typed (for resumability score)
 
     @property
     def is_agent(self) -> bool:
@@ -214,6 +215,9 @@ _HEARTBEAT_RE = re.compile(
     re.I,
 )
 
+# term-mesh dispatch opener: "Task <hexid> — ..." / "Task <hexid>: ...".
+_DISPATCH_RE = re.compile(r"Task [0-9a-f]{6,}\b")
+
 # System/command wrapper prefixes that are machine-emitted, not a human typing.
 _SYSTEM_WRAPPER_PREFIXES = (
     "<local-command-stdout>",
@@ -221,8 +225,18 @@ _SYSTEM_WRAPPER_PREFIXES = (
     "<local-command-caveat>",
     "<command-message>",
     "<command-name>",
-    "<teammate-message",  # term-mesh agent-to-agent dispatch
+    "<teammate-message",   # term-mesh agent-to-agent dispatch
+    "<task-notification>",  # background task completion injected mid-session
+    "<bash-input>",         # user ran a `!` shell command, not a task
+    "<bash-stdout>",
+    "<bash-stderr>",
 )
+
+# A session is classified human-vs-agent by its opening: only the first few
+# typed (non-meta, text-bearing) user messages decide. This stops a dispatched
+# task, paste, or task-notification deep in a long session from flipping an
+# automation session to "human" (or vice versa).
+_OPENING_USER_MSGS = 3
 
 
 def _unwrap_command(text: str) -> tuple[str, str] | None:
@@ -265,33 +279,21 @@ def _classify_prompt(text: str) -> tuple[str, bool]:
         return text, False
     if _is_heartbeat(text):
         return text, False
+    if _DISPATCH_RE.match(text):
+        return text, False
     if text.startswith(_SYSTEM_WRAPPER_PREFIXES):
         return text, False
     return text, True
 
 
-def _read_last_line(filepath: Path) -> str | None:
-    """Read the last line of a file efficiently by seeking from end."""
-    try:
-        with open(filepath, "rb") as f:
-            f.seek(0, 2)
-            size = f.tell()
-            if size == 0:
-                return None
-            chunk = min(8192, size)
-            f.seek(-chunk, 2)
-            data = f.read()
-            lines = data.split(b"\n")
-            for line in reversed(lines):
-                if line.strip():
-                    return line.decode("utf-8", errors="replace")
-    except OSError:
-        pass
-    return None
-
-
 def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
-    """Load session metadata from a JSONL transcript file."""
+    """Load session metadata from a JSONL transcript file.
+
+    Scans the whole file in a single pass so the first human prompt is found
+    even when it sits past the first dozen records (long agent system prompts,
+    bulk attachments), and so message_count / human_msgs / last timestamp are
+    exact rather than capped at an arbitrary read window.
+    """
     session_id = jsonl_file.stem
     genuine = ""    # first genuine human instruction (display text)
     fallback = ""   # first non-genuine user text (bare command / injected dispatch)
@@ -299,13 +301,17 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
     cwd = ""
     entrypoint = ""
     first_ts = None
-    msg_count = 0
+    last_ts = None
+    user_msgs = 0
+    assistant_msgs = 0
+    human_msgs = 0     # genuine user messages over the whole session (for score)
+    opening_seen = 0   # text-bearing non-meta user messages examined for classification
 
     try:
         with open(jsonl_file, "r") as f:
-            for i, line in enumerate(f):
-                if i >= 50:
-                    break
+            for line in f:
+                if not line.strip():
+                    continue
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
@@ -319,28 +325,39 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
                     cwd = obj.get("cwd", "")
                 if not entrypoint:
                     entrypoint = obj.get("entrypoint", "")
-                if first_ts is None:
-                    ts = obj.get("timestamp")
-                    if ts:
-                        try:
-                            _parse_iso(ts)
+                ts = obj.get("timestamp")
+                if ts:
+                    try:
+                        _parse_iso(ts)
+                        if first_ts is None:
                             first_ts = ts
-                        except ValueError:
-                            pass
+                        last_ts = ts
+                    except ValueError:
+                        pass
 
                 t = obj.get("type", "")
-                if t in ("user", "assistant"):
-                    msg_count += 1
-                if t == "user" and not genuine and not obj.get("isMeta", False):
+                if t == "assistant":
+                    assistant_msgs += 1
+                elif t == "user":
+                    user_msgs += 1
+                    if obj.get("isMeta", False):
+                        continue
                     msg = obj.get("message", {})
-                    if isinstance(msg, dict):
-                        text = _extract_first_user_prompt(msg)
-                        if text and text.strip():
-                            display, is_genuine = _classify_prompt(text)
-                            if is_genuine:
-                                genuine = display
-                            elif not fallback:
-                                fallback = display
+                    if not isinstance(msg, dict):
+                        continue
+                    text = _extract_first_user_prompt(msg)
+                    if not (text and text.strip()):
+                        continue
+                    display, is_genuine = _classify_prompt(text)
+                    if is_genuine:
+                        human_msgs += 1
+                    # Decide human-vs-agent from the opening only.
+                    if not genuine and opening_seen < _OPENING_USER_MSGS:
+                        opening_seen += 1
+                        if is_genuine:
+                            genuine = display
+                        elif not fallback:
+                            fallback = display
     except OSError:
         return None
 
@@ -352,19 +369,6 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
     # ever typed a genuine first instruction (dispatch / heartbeat / automation).
     is_agent = (entrypoint == "sdk-cli") or not genuine
 
-    # Get last timestamp from end of file
-    last_ts = first_ts
-    last_line = _read_last_line(jsonl_file)
-    if last_line:
-        try:
-            last_obj = json.loads(last_line)
-            ts = last_obj.get("timestamp")
-            if ts:
-                _parse_iso(ts)  # validate
-                last_ts = ts
-        except (json.JSONDecodeError, ValueError):
-            pass
-
     project_path = cwd if cwd else ""
     project_name = Path(project_path).name if project_path else project_dir.name
 
@@ -373,12 +377,13 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
         project_name=project_name,
         project_path=project_path,
         first_prompt=first_prompt,
-        message_count=msg_count,
+        message_count=user_msgs + assistant_msgs,
         git_branch=git_branch,
         created=first_ts,
-        modified=last_ts,
+        modified=last_ts or first_ts,
         entrypoint=entrypoint or "cli",
         agent=is_agent,
+        human_msgs=human_msgs,
     )
 
 

@@ -26,7 +26,13 @@ from rich.text import Text
 CACHE_DIR = Path.home() / ".cache" / "claude-resume"
 CACHE_FILE = CACHE_DIR / "sessions.json"
 # Bump when the Session schema or extraction logic changes, to invalidate stale caches.
-_SCHEMA_VERSION = "3"
+_SCHEMA_VERSION = "4"
+
+# Cap on the cached human-message search blob, in characters, per session.
+_SEARCH_TEXT_CAP = 1000
+# Cap on the stored first prompt (the detail view compacts to 500 anyway). Keeps
+# the cache small even when a session opens with a huge pasted/agent prompt.
+_FIRST_PROMPT_CAP = 800
 
 
 @dataclass
@@ -43,6 +49,7 @@ class Session:
     entrypoint: str = "cli"  # "cli" = main session, "sdk-cli" = agent/subagent session
     agent: bool = False  # content-based: no genuine human first prompt (dispatch/automation)
     human_msgs: int = 0  # non-meta user messages a human typed (for resumability score)
+    search_text: str = ""  # lowercased blob of human messages, for content search
 
     @property
     def is_agent(self) -> bool:
@@ -308,6 +315,8 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
     assistant_msgs = 0
     human_msgs = 0     # genuine user messages over the whole session (for score)
     opening_seen = 0   # text-bearing non-meta user messages examined for classification
+    search_parts: list[str] = []  # human message texts for content search
+    search_len = 0
 
     try:
         with open(jsonl_file, "r") as f:
@@ -353,6 +362,9 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
                     display, is_genuine = _classify_prompt(text)
                     if is_genuine:
                         human_msgs += 1
+                        if search_len < _SEARCH_TEXT_CAP:
+                            search_parts.append(display[:_SEARCH_TEXT_CAP].lower())
+                            search_len += len(display) + 1
                     # Decide human-vs-agent from the opening only.
                     if not genuine and opening_seen < _OPENING_USER_MSGS:
                         opening_seen += 1
@@ -363,7 +375,7 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
     except OSError:
         return None
 
-    first_prompt = genuine or fallback
+    first_prompt = (genuine or fallback)[:_FIRST_PROMPT_CAP]
     if first_ts is None or not first_prompt:
         return None
 
@@ -386,6 +398,7 @@ def _load_from_jsonl(jsonl_file: Path, project_dir: Path) -> Session | None:
         entrypoint=entrypoint or "cli",
         agent=is_agent,
         human_msgs=human_msgs,
+        search_text=" ".join(search_parts)[:_SEARCH_TEXT_CAP],
     )
 
 
@@ -883,7 +896,13 @@ class SessionPicker(App):
             search = self.query_one("#search", Input).value.lower().strip()
         except Exception:
             search = ""
-        if search:
+        if search.startswith("r:"):
+            # response-only search
+            term = search[2:].strip()
+            self.filtered_sessions = [
+                s for s in scope_sessions if term and term in s.last_response.lower()
+            ] if term else scope_sessions
+        elif search:
             self.filtered_sessions = [
                 s for s in scope_sessions
                 if search in s.project_name.lower()
@@ -891,6 +910,7 @@ class SessionPicker(App):
                 or search in s.last_response.lower()
                 or search in s.git_branch.lower()
                 or search in s.session_id.lower()
+                or search in s.search_text
             ]
         else:
             self.filtered_sessions = scope_sessions

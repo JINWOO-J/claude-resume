@@ -849,7 +849,7 @@ class SessionPicker(App):
         self.filtered_sessions: list[Session] = []
         self.selected_session: Session | None = None
         self.current_project = detect_current_project()
-        self.sort_mode = "resume"
+        self.sort_mode = "modified"
         self._init_global = initial_global
         self.full_id = full_id
         self._init_show_agents = show_agents

@@ -15,7 +15,7 @@ Browse, search, and resume previous Claude Code sessions from any project — wi
 - **Real-time search** — Filter by project name, git branch, or message content (every prompt you typed, not just the first). Prefix with `r:` to search only the last assistant response
 - **Project scoping** — Toggle between current project and all projects (`Ctrl+T`)
 - **Agent filtering** — Hides agent/automation sessions (subagents, dispatched tasks, slash-command, heartbeat) by default; toggle with `a`
-- **Resumability ranking** — Default sort surfaces the sessions most worth resuming (human depth × recency); demotes one-turn and stale sessions
+- **Recency-first default** — Default sort puts the most recently used session on top; the resumability ranking (human depth × recency, demoting one-turn and stale sessions) is one `Ctrl+S` away
 - **Sort modes** — Cycle through Resumable / Modified / Messages / Project (`Ctrl+S`)
 - **Readable rows** — Strips filler openings ("can you please…"), middle-truncates long prompts, color-codes recency, and groups by project (in Project sort)
 - **Session detail** — View full metadata with `Space`

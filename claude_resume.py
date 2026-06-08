@@ -8,6 +8,7 @@ import math
 import os
 import re
 import sys
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1059,11 +1060,19 @@ class SessionPicker(App):
 # CLI
 # ---------------------------------------------------------------------------
 
+try:
+    __version__ = _pkg_version("claude-resume")
+except PackageNotFoundError:
+    __version__ = "unknown"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="TUI session picker for Claude Code resume",
         epilog="All other arguments are passed through to the claude CLI.",
     )
+    parser.add_argument("--version", "-V", action="version",
+                        version=f"claude-resume {__version__}")
     parser.add_argument("--global", "-g", dest="global_mode", action="store_true",
                         help="Start in global (all projects) mode")
     parser.add_argument("--local", "-l", dest="local_mode", action="store_true",

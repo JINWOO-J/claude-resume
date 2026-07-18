@@ -25,8 +25,8 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/jinwoo/claude-resume"
-Repository = "https://github.com/jinwoo/claude-resume"
+Homepage = "https://github.com/jinwoo-j/claude-resume"
+Repository = "https://github.com/jinwoo-j/claude-resume"
 
 [project.scripts]
 claude-resume = "claude_resume:main"

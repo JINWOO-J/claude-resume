@@ -33,7 +33,7 @@ pip install claude-resume
 Or install from source:
 
 ```bash
-git clone https://github.com/jinwoo/claude-resume.git
+git clone https://github.com/jinwoo-j/claude-resume.git
 cd claude-resume
 pip install -e .
 ```

@@ -562,7 +562,7 @@ def _get_last_assistant_response(session_id: str) -> str:
                 continue
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             if obj.get("type") != "assistant":
                 continue
@@ -616,7 +616,7 @@ def get_last_messages(session_id: str) -> tuple[str, str]:
                 continue
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
             msg_type = obj.get("type", "")
             if msg_type == "user" and not last_user:
